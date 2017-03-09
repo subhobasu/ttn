@@ -248,14 +248,26 @@ func (c *Client) NewGatewayStreams(id string, token string) GenericStream {
 			chDownlink := make(chan *DownlinkMessage, c.config.BufferSize)
 			chStatus := make(chan *gateway.Status, c.config.BufferSize)
 
+			defer func() {
+				close(chUplink)
+				// chDownlink is closed by the stream
+				close(chStatus)
+			}()
+
 			// Uplink stream
 			uplink, err := cli.Uplink(ctx)
 			if err != nil {
 				log.WithError(err).Warn("Could not set up Uplink stream")
 			} else {
+				s.mu.Lock()
+				s.uplink[server.name] = chUplink
+				s.mu.Unlock()
 				go func() {
 					err := uplink.RecvMsg(new(empty.Empty))
 					logStreamErr("Uplink", err)
+					s.mu.Lock()
+					defer s.mu.Unlock()
+					delete(s.uplink, server.name)
 				}()
 			}
 
@@ -264,8 +276,16 @@ func (c *Client) NewGatewayStreams(id string, token string) GenericStream {
 			if err != nil {
 				log.WithError(err).Warn("Could not set up Subscribe stream")
 			} else {
+				s.mu.Lock()
+				s.downlink[server.name] = chDownlink
+				s.mu.Unlock()
 				go func() {
-					defer close(chDownlink)
+					defer func() {
+						close(chDownlink)
+						s.mu.Lock()
+						defer s.mu.Unlock()
+						delete(s.downlink, server.name)
+					}()
 					for {
 						msg, err := downlink.Recv()
 						if err != nil {
@@ -286,17 +306,17 @@ func (c *Client) NewGatewayStreams(id string, token string) GenericStream {
 			if err != nil {
 				log.WithError(err).Warn("Could not set up GatewayStatus stream")
 			} else {
+				s.mu.Lock()
+				s.status[server.name] = chStatus
+				s.mu.Unlock()
 				go func() {
 					err := status.RecvMsg(new(empty.Empty))
 					logStreamErr("GatewayStatus", err)
+					s.mu.Lock()
+					defer s.mu.Unlock()
+					delete(s.status, server.name)
 				}()
 			}
-
-			s.mu.Lock()
-			s.uplink[server.name] = chUplink
-			s.downlink[server.name] = chDownlink
-			s.status[server.name] = chStatus
-			s.mu.Unlock()
 
 			log.Debug("Start handling Gateway streams")
 			defer log.Debug("Done handling Gateway streams")
